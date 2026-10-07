@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Card, CardContent, Chip, Divider, Grid, LinearProgress, Stack, Table, TableBody, TableCell, TableHead, TableRow, TextField, Typography } from '@mui/material'
 import { RulerInput } from '../components/common/RulerInput'
 import { useFiberStore } from '../stores/fiberStore'
+import { usePulpStore } from '../stores/pulpStore'
 import { useRunStore } from '../stores/runStore'
 import { BLEACH_METHODS, COOK_AGENTS, FIBER_MATERIALS, type FiberBatchInput, type FiberMaterial, type CookAgent, type BleachMethod } from '../types/fiber-batch'
+import { summarizePulpAccounts } from '../utils/pulp'
 
 const emptyFiberForm: FiberBatchInput = {
   batchNo: '',
@@ -16,24 +18,47 @@ const emptyFiberForm: FiberBatchInput = {
   operator: '罗青禾',
 }
 
+const LOW_STOCK_KG = 20
+
 export default function FiberBatchList() {
   const fiberBatches = useFiberStore((state) => state.fiberBatches)
   const error = useFiberStore((state) => state.error)
   const loadFiberBatches = useFiberStore((state) => state.loadFiberBatches)
   const addFiberBatch = useFiberStore((state) => state.addFiberBatch)
+  const updateBeatingDegree = useFiberStore((state) => state.updateBeatingDegree)
+  const discontinueBatch = useFiberStore((state) => state.discontinueBatch)
   const runs = useRunStore((state) => state.sheetRuns)
   const loadRuns = useRunStore((state) => state.loadRuns)
+  const pulpFeeds = usePulpStore((state) => state.pulpFeeds)
+  const pulpError = usePulpStore((state) => state.error)
+  const loadPulpFeeds = usePulpStore((state) => state.loadPulpFeeds)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<FiberBatchInput>(emptyFiberForm)
+  const [stockKg, setStockKg] = useState(150)
   const [materialFilter, setMaterialFilter] = useState<FiberMaterial | '全部'>('全部')
   const [degreeLimit, setDegreeLimit] = useState(45)
+  const [degreeDrafts, setDegreeDrafts] = useState<Record<number, number>>({})
+  const [confirmingId, setConfirmingId] = useState<number | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
     void loadFiberBatches()
     void loadRuns()
-  }, [loadFiberBatches, loadRuns])
+    void loadPulpFeeds()
+  }, [loadFiberBatches, loadPulpFeeds, loadRuns])
 
+  const accounts = useMemo(() => summarizePulpAccounts(pulpFeeds), [pulpFeeds])
+  const vatFeedsByBatch = useMemo(() => {
+    const map = new Map<number, typeof pulpFeeds>()
+    for (const feed of pulpFeeds) {
+      if (feed.kind !== '合槽') continue
+      const list = map.get(feed.batchId) ?? []
+      list.push(feed)
+      map.set(feed.batchId, list)
+    }
+    return map
+  }, [pulpFeeds])
+  const runById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs])
   const filteredBatches = useMemo(
     () => fiberBatches.filter((batch) => (materialFilter === '全部' || batch.material === materialFilter) && batch.beatingDegree <= degreeLimit),
     [degreeLimit, fiberBatches, materialFilter],
@@ -47,29 +72,39 @@ export default function FiberBatchList() {
   }
 
   const handleSubmit = async () => {
-    if (!form.batchNo.trim() || !form.origin.trim() || !form.operator.trim() || form.cookHours <= 0 || form.beatingDegree <= 0) return
+    if (!form.batchNo.trim() || !form.origin.trim() || !form.operator.trim() || form.cookHours <= 0 || form.beatingDegree <= 0 || stockKg <= 0) return
     setSubmitting(true)
-    const created = await addFiberBatch({ ...form, batchNo: form.batchNo.trim(), origin: form.origin.trim(), operator: form.operator.trim() })
+    const created = await addFiberBatch({ ...form, batchNo: form.batchNo.trim(), origin: form.origin.trim(), operator: form.operator.trim() }, stockKg)
     setSubmitting(false)
     if (created) {
       setForm(emptyFiberForm)
+      setStockKg(150)
       setShowForm(false)
     }
   }
+
+  const handleDiscontinue = async (id: number) => {
+    setSubmitting(true)
+    const done = await discontinueBatch(id)
+    setSubmitting(false)
+    if (done) setConfirmingId(null)
+  }
+
+  const errorMessage = error ?? pulpError
 
   return (
     <Stack spacing={3}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: { xs: 'flex-start', md: 'center' }, flexDirection: { xs: 'column', md: 'row' } }}>
         <Box>
           <Typography component="h1" variant="h3" color="#344a34">纤维料批台账</Typography>
-          <Typography color="text.secondary" sx={{ mt: 0.75 }}>按原料与打浆度横向比较，并回看料批进入各槽抄纸工序的引用关系。</Typography>
+          <Typography color="text.secondary" sx={{ mt: 0.75 }}>余量由投料记录汇总，按原料与打浆度横向比较，并回看料批进入各槽的投料明细。</Typography>
         </Box>
         <Button variant="contained" size="large" onClick={() => setShowForm((current) => !current)} data-testid="new-fiber">
           {showForm ? '收起登记' : '新建料批'}
         </Button>
       </Box>
 
-      {error && <Alert severity="warning">{error}</Alert>}
+      {errorMessage && <Alert severity="warning">{errorMessage}</Alert>}
 
       {showForm && (
         <Card data-testid="form-fiber" sx={{ borderColor: '#9eb096' }}>
@@ -97,6 +132,7 @@ export default function FiberBatchList() {
               <Grid item xs={12} md={5}>
                 <RulerInput label="打浆度" value={form.beatingDegree} onChange={(value) => updateForm('beatingDegree', value)} unit="°SR" min={10} max={60} step={1} testId="field-beatingDegree" />
               </Grid>
+              <Grid item xs={6} md={2}><TextField fullWidth type="number" label="配浆入库量" value={stockKg} onChange={(event) => setStockKg(Number(event.target.value))} inputProps={{ min: 1, max: 2000, step: 1, 'data-testid': 'field-stockKg' }} InputProps={{ endAdornment: 'kg' }} /></Grid>
               <Grid item xs={12} md={4}><TextField fullWidth label="操作人" value={form.operator} onChange={(event) => updateForm('operator', event.target.value)} inputProps={{ 'data-testid': 'field-operator' }} /></Grid>
             </Grid>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2.5 }}>
@@ -127,13 +163,20 @@ export default function FiberBatchList() {
 
       <Stack spacing={1.5}>
         {filteredBatches.map((batch) => {
-          const relatedRuns = runs.filter((run) => run.batchId === batch.id)
+          const batchId = batch.id ?? 0
+          const account = accounts.get(batchId) ?? { stockedKg: 0, consumedKg: 0, remainingKg: 0 }
+          const batchVatFeeds = vatFeedsByBatch.get(batchId) ?? []
+          const discontinued = batch.status === '停用'
+          const degreeDraft = degreeDrafts[batchId] ?? batch.beatingDegree
           return (
-            <Accordion key={batch.id ?? batch.batchNo} data-testid="row-fiber" disableGutters sx={{ border: '1px solid #ddd2bd', borderRadius: '10px !important', '&::before': { display: 'none' } }}>
+            <Accordion key={batch.id ?? batch.batchNo} data-testid="row-fiber" disableGutters sx={{ border: '1px solid #ddd2bd', borderRadius: '10px !important', '&::before': { display: 'none' }, opacity: discontinued ? 0.82 : 1 }}>
               <AccordionSummary expandIcon={<Box component="span" aria-hidden="true" sx={{ fontSize: 20, lineHeight: 1 }}>⌄</Box>}>
                 <Grid container spacing={1.5} alignItems="center" sx={{ width: '100%' }}>
                   <Grid item xs={12} sm={3} md={2}>
-                    <Typography sx={{ fontWeight: 800 }}>{batch.batchNo}</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                      <Typography sx={{ fontWeight: 800 }}>{batch.batchNo}</Typography>
+                      {discontinued && <Chip size="small" color="warning" label="停用" />}
+                    </Box>
                     <Typography variant="caption" color="text.secondary">{batch.origin}</Typography>
                   </Grid>
                   <Grid item xs={6} sm={2}><Chip label={batch.material} color={batch.material === '构皮' ? 'success' : 'default'} variant="outlined" /></Grid>
@@ -144,25 +187,86 @@ export default function FiberBatchList() {
                       <LinearProgress variant="determinate" value={batch.beatingDegree} color="success" sx={{ flex: 1, height: 8, borderRadius: 4 }} />
                     </Box>
                   </Grid>
-                  <Grid item xs={12} md={3}><Typography variant="body2" color="text.secondary">{batch.bleachMethod} · {batch.operator} · 引用 {relatedRuns.length} 次</Typography></Grid>
+                  <Grid item xs={12} md={3}>
+                    <Typography variant="body2" color={account.remainingKg < LOW_STOCK_KG ? 'warning.dark' : 'text.secondary'} sx={{ fontWeight: account.remainingKg < LOW_STOCK_KG ? 700 : 400 }}>
+                      余量 {account.remainingKg} kg · 引用 {batchVatFeeds.length} 次
+                    </Typography>
+                  </Grid>
                 </Grid>
               </AccordionSummary>
               <AccordionDetails sx={{ bgcolor: '#faf6ec' }}>
                 <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
-                  <Chip size="small" label={`平均打浆度 ${averageDegree.toFixed(1)}°SR`} />
+                  <Chip size="small" label={`入库 ${account.stockedKg} kg`} />
+                  <Chip size="small" label={`已耗 ${account.consumedKg} kg`} />
+                  <Chip size="small" color={account.remainingKg < LOW_STOCK_KG ? 'warning' : 'success'} variant="outlined" label={`余量 ${account.remainingKg} kg`} />
                   <Chip size="small" label={batch.beatingDegree >= 35 ? '细浆，适合薄页' : batch.beatingDegree >= 29 ? '中细浆，成纸兼顾韧性' : '粗浆，适合厚实纸页'} />
                 </Box>
+                <Grid container spacing={2} alignItems="flex-end" sx={{ mb: 1.5 }}>
+                  <Grid item xs={12} md={5}>
+                    <RulerInput
+                      label="打浆度复测"
+                      value={degreeDraft}
+                      onChange={(value) => setDegreeDrafts((current) => ({ ...current, [batchId]: value }))}
+                      unit="°SR"
+                      min={10}
+                      max={60}
+                      step={1}
+                      compact
+                      disabled={discontinued}
+                      testId={batch.id === undefined ? undefined : `row-beatingDegree-${batch.id}`}
+                      helperText="复测只更新料批主数据，历史工序配方以投料记录快照为准，不会倒改"
+                    />
+                  </Grid>
+                  <Grid item xs={6} md={2}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      disabled={discontinued || degreeDraft === batch.beatingDegree}
+                      onClick={() => void updateBeatingDegree(batchId, degreeDraft)}
+                    >
+                      保存复测
+                    </Button>
+                  </Grid>
+                  <Grid item xs={6} md={5} sx={{ textAlign: { md: 'right' } }}>
+                    {discontinued ? (
+                      <Typography variant="caption" color="warning.dark">该料批已停用，仅冻结引用它的 {batchVatFeeds.length} 槽工序及其样本</Typography>
+                    ) : confirmingId === batchId ? (
+                      <Box sx={{ display: 'flex', gap: 1, justifyContent: { xs: 'flex-start', md: 'flex-end' } }}>
+                        <Button size="small" color="warning" variant="contained" disabled={submitting} onClick={() => void handleDiscontinue(batchId)} data-testid={`confirm-discontinue-${batchId}`}>
+                          确认停用
+                        </Button>
+                        <Button size="small" onClick={() => setConfirmingId(null)}>再想想</Button>
+                      </Box>
+                    ) : (
+                      <Button size="small" color="warning" variant="outlined" onClick={() => setConfirmingId(batchId)} data-testid={`discontinue-${batchId}`}>
+                        停用该料批
+                      </Button>
+                    )}
+                  </Grid>
+                </Grid>
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>引用本料批的抄纸工序</Typography>
-                {relatedRuns.length ? (
+                {batchVatFeeds.length ? (
                   <Table size="small">
-                    <TableHead><TableRow><TableCell>工序号</TableCell><TableCell>日期</TableCell><TableCell>操作人</TableCell><TableCell align="right">克重</TableCell><TableCell align="right">实测间距</TableCell></TableRow></TableHead>
+                    <TableHead><TableRow><TableCell>工序号</TableCell><TableCell>日期</TableCell><TableCell>操作人</TableCell><TableCell align="right">投料占比</TableCell><TableCell align="right">分摊消耗</TableCell><TableCell align="right">实测间距</TableCell></TableRow></TableHead>
                     <TableBody>
-                      {relatedRuns.map((run) => (
-                        <TableRow key={run.id ?? run.runNo}>
-                          <TableCell>{run.runNo}</TableCell><TableCell>{run.runDate}</TableCell><TableCell>{run.operator}</TableCell>
-                          <TableCell align="right">{run.grammage} 克/平方米</TableCell><TableCell align="right">{run.measuredGap.toFixed(2)} mm</TableCell>
-                        </TableRow>
-                      ))}
+                      {batchVatFeeds.map((feed) => {
+                        const run = runById.get(feed.runId ?? 0)
+                        return (
+                          <TableRow key={feed.id ?? feed.feedNo} sx={{ bgcolor: run?.frozen ? '#eceae4' : undefined }}>
+                            <TableCell>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                                {feed.runNo ?? run?.runNo ?? '未知工序'}
+                                {run?.frozen && <Chip size="small" color="warning" variant="outlined" label="已冻结" />}
+                              </Box>
+                            </TableCell>
+                            <TableCell>{run?.runDate ?? feed.createdAt.slice(0, 10)}</TableCell>
+                            <TableCell>{run?.operator ?? '—'}</TableCell>
+                            <TableCell align="right">{feed.sharePct}%（{feed.feedKg} kg）</TableCell>
+                            <TableCell align="right">{feed.consumedKg} kg</TableCell>
+                            <TableCell align="right">{run ? `${run.measuredGap.toFixed(2)} mm` : '—'}</TableCell>
+                          </TableRow>
+                        )
+                      })}
                     </TableBody>
                   </Table>
                 ) : (

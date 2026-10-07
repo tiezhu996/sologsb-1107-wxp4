@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { Mould, MouldInput, MouldStateValue } from '../types/mould'
-import { db, plain } from '../utils/db'
+import { db, plain, SCHEMA_REV } from '../utils/db'
 
 interface MouldStore {
   moulds: Mould[]
@@ -32,7 +32,7 @@ export const useMouldStore = create<MouldStore>((set, get) => ({
     try {
       const payload = plain(input)
       const id = Number(await db.moulds.add(payload))
-      const created: Mould = { ...payload, id, schemaRev: 2 }
+      const created: Mould = { ...payload, id, schemaRev: SCHEMA_REV }
       set((state) => ({ moulds: [created, ...state.moulds] }))
       return created
     } catch {
@@ -42,9 +42,9 @@ export const useMouldStore = create<MouldStore>((set, get) => ({
   },
   setMouldState: async (id, nextState) => {
     try {
-      await db.moulds.update(id, { state: nextState, schemaRev: 2 })
+      await db.moulds.update(id, { state: nextState, schemaRev: SCHEMA_REV })
       set((state) => ({
-        moulds: state.moulds.map((mould) => (mould.id === id ? { ...mould, state: nextState, schemaRev: 2 } : mould)),
+        moulds: state.moulds.map((mould) => (mould.id === id ? { ...mould, state: nextState, schemaRev: SCHEMA_REV } : mould)),
         error: null,
       }))
     } catch {

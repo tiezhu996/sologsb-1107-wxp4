@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Box, Button, Card, CardContent, Chip, Grid, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from '@mui/material'
+import { Alert, Box, Button, Card, CardContent, Chip, Divider, Grid, Stack, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, TextField, Typography } from '@mui/material'
 import { ProcessTimeline, type ProcessStep } from '../components/common/ProcessTimeline'
 import { RulerInput } from '../components/common/RulerInput'
 import { useUnitConvert } from '../hooks/useUnitConvert'
 import { useFiberStore } from '../stores/fiberStore'
 import { useMouldStore } from '../stores/mouldStore'
+import { usePulpStore } from '../stores/pulpStore'
 import { useRunStore } from '../stores/runStore'
-import { DRY_METHODS, STRIPE_DIRECTIONS, type DryMethod, type SheetRunInput, type StripeDirection } from '../types/sheet-run'
+import { DRY_METHODS, STRIPE_DIRECTIONS, type DryMethod, type RunFeedInput, type SheetRunInput, type StripeDirection } from '../types/sheet-run'
+import { allocateConsumption, frameAreaSqm, newRequestId, summarizePulpAccounts, vatConsumptionKg } from '../utils/pulp'
 import { calculateDeviation, getGapConclusion, isGapOutOfTolerance } from '../utils/stripe'
 
 function todayIso(): string {
@@ -16,7 +18,6 @@ function todayIso(): string {
 const emptyRunForm: SheetRunInput = {
   runNo: '',
   mouldId: 1,
-  batchId: 1,
   runDate: todayIso(),
   operator: '罗青禾',
   stripeDirection: '竖帘纹',
@@ -27,6 +28,8 @@ const emptyRunForm: SheetRunInput = {
   measuredGap: 1.1,
   deviation: 0,
 }
+
+const emptyFeedDraft = (): RunFeedInput => ({ batchId: 0, feedKg: 5 })
 
 const processSteps: ProcessStep[] = [
   { label: '浆料复核', detail: '核对料批打浆度与漂洗状态。', status: 'done' },
@@ -48,8 +51,13 @@ export default function RunBoard() {
   const batches = useFiberStore((state) => state.fiberBatches)
   const batchError = useFiberStore((state) => state.error)
   const loadBatches = useFiberStore((state) => state.loadFiberBatches)
+  const pulpFeeds = usePulpStore((state) => state.pulpFeeds)
+  const pulpError = usePulpStore((state) => state.error)
+  const loadPulpFeeds = usePulpStore((state) => state.loadPulpFeeds)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<SheetRunInput>(emptyRunForm)
+  const [feedDrafts, setFeedDrafts] = useState<RunFeedInput[]>([emptyFeedDraft()])
+  const [requestId, setRequestId] = useState(() => newRequestId())
   const [dateFilter, setDateFilter] = useState('')
   const [mouldFilter, setMouldFilter] = useState('全部')
   const [draftGaps, setDraftGaps] = useState<Record<number, number>>({})
@@ -60,10 +68,23 @@ export default function RunBoard() {
     void loadRuns()
     void loadMoulds()
     void loadBatches()
-  }, [loadBatches, loadMoulds, loadRuns])
+    void loadPulpFeeds()
+  }, [loadBatches, loadMoulds, loadPulpFeeds, loadRuns])
 
   const mouldById = useMemo(() => new Map(moulds.map((mould) => [mould.id, mould])), [moulds])
   const batchById = useMemo(() => new Map(batches.map((batch) => [batch.id, batch])), [batches])
+  const activeBatches = useMemo(() => batches.filter((batch) => batch.status === '在用'), [batches])
+  const accounts = useMemo(() => summarizePulpAccounts(pulpFeeds), [pulpFeeds])
+  const feedsByRunId = useMemo(() => {
+    const map = new Map<number, typeof pulpFeeds>()
+    for (const feed of pulpFeeds) {
+      if (feed.kind !== '合槽' || feed.runId === undefined) continue
+      const list = map.get(feed.runId) ?? []
+      list.push(feed)
+      map.set(feed.runId, list)
+    }
+    return map
+  }, [pulpFeeds])
   const filteredRuns = useMemo(
     () => runs.filter((run) => {
       const mould = mouldById.get(run.mouldId)
@@ -75,10 +96,17 @@ export default function RunBoard() {
   )
   const selectedMould = mouldById.get(form.mouldId) ?? moulds[0]
   const formDeviation = calculateDeviation(form.measuredGap, selectedMould?.stripeGap ?? form.measuredGap)
+  const vatTotalKg = vatConsumptionKg(form.grammage, selectedMould?.frameW ?? 0, selectedMould?.frameH ?? 0, form.stackHeight)
+  const allocations = useMemo(() => allocateConsumption(vatTotalKg, feedDrafts.filter((draft) => draft.batchId > 0 && draft.feedKg > 0)), [feedDrafts, vatTotalKg])
+  const totalFeedKg = feedDrafts.reduce((sum, draft) => sum + (draft.feedKg > 0 ? draft.feedKg : 0), 0)
   const latestRun = runs[0]
 
   const updateForm = <K extends keyof SheetRunInput,>(key: K, value: SheetRunInput[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
+  }
+
+  const updateFeedDraft = (index: number, patch: Partial<RunFeedInput>) => {
+    setFeedDrafts((current) => current.map((draft, position) => (position === index ? { ...draft, ...patch } : draft)))
   }
 
   const handleMouldChange = (mouldId: number) => {
@@ -89,27 +117,38 @@ export default function RunBoard() {
     })
   }
 
+  const toggleForm = () => {
+    setShowForm((current) => {
+      if (!current) setRequestId(newRequestId())
+      return !current
+    })
+  }
+
   const handleSubmit = async () => {
     if (!form.runNo.trim() || !form.operator.trim() || form.measuredGap <= 0 || form.grammage <= 0) return
+    const drafts = feedDrafts.filter((draft) => draft.batchId > 0 && draft.feedKg > 0)
+    if (drafts.length === 0) return
     setSubmitting(true)
-    const created = await addRun({ ...form, runNo: form.runNo.trim(), operator: form.operator.trim(), deviation: formDeviation })
+    const created = await addRun({ ...form, runNo: form.runNo.trim(), operator: form.operator.trim(), deviation: formDeviation }, drafts, requestId)
     setSubmitting(false)
     if (created) {
       setForm(emptyRunForm)
+      setFeedDrafts([emptyFeedDraft()])
+      setRequestId(newRequestId())
       setShowForm(false)
     }
   }
 
-  const error = runError ?? mouldError ?? batchError
+  const error = runError ?? mouldError ?? batchError ?? pulpError
 
   return (
     <Stack spacing={3}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, alignItems: { xs: 'flex-start', md: 'center' }, flexDirection: { xs: 'column', md: 'row' } }}>
         <Box>
           <Typography component="h1" variant="h3" color="#344a34">抄纸工序记录台</Typography>
-          <Typography color="text.secondary" sx={{ mt: 0.75 }}>关联纸帘与料批，记录抄纸参数，并在行内复测帘纹间距。</Typography>
+          <Typography color="text.secondary" sx={{ mt: 0.75 }}>关联纸帘与多批浆料，按克重、帘框面积与叠高分摊消耗，并在行内复测帘纹间距。</Typography>
         </Box>
-        <Button variant="contained" size="large" onClick={() => setShowForm((current) => !current)} data-testid="new-run">
+        <Button variant="contained" size="large" onClick={toggleForm} data-testid="new-run">
           {showForm ? '收起登记' : '新建工序'}
         </Button>
       </Box>
@@ -131,12 +170,6 @@ export default function RunBoard() {
                   {moulds.filter((mould) => mould.state !== '退役').map((mould) => <option key={mould.id} value={mould.id}>{mould.mouldNo} · {mould.stripeGap} mm</option>)}
                 </TextField>
               </Grid>
-              <Grid item xs={6} md={2.5}>
-                <TextField select fullWidth label="纤维料批" value={form.batchId} onChange={(event) => updateForm('batchId', Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-batchId' } }}>
-                  {!batches.some((batch) => batch.id === form.batchId) && <option value={form.batchId}>料批数据载入中</option>}
-                  {batches.map((batch) => <option key={batch.id} value={batch.id}>{batch.batchNo} · {batch.material}</option>)}
-                </TextField>
-              </Grid>
               <Grid item xs={12} md={2}><TextField fullWidth type="date" label="抄纸日期" value={form.runDate} onChange={(event) => updateForm('runDate', event.target.value)} InputLabelProps={{ shrink: true }} inputProps={{ 'data-testid': 'field-runDate' }} /></Grid>
               <Grid item xs={12} md={2}><TextField fullWidth label="操作人" value={form.operator} onChange={(event) => updateForm('operator', event.target.value)} inputProps={{ 'data-testid': 'field-operator' }} /></Grid>
               <Grid item xs={6} md={2}>
@@ -156,6 +189,59 @@ export default function RunBoard() {
                 <RulerInput label="实测帘纹间距" value={form.measuredGap} onChange={(value) => updateForm('measuredGap', value)} min={0.1} max={5} step={0.01} testId="field-measuredGap" helperText={`${getGapConclusion(formDeviation)}，允许偏差 ±0.2 mm`} />
               </Grid>
             </Grid>
+
+            <Divider sx={{ my: 2.5 }} />
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, flexWrap: 'wrap', mb: 1.5 }}>
+              <Box>
+                <Typography variant="h6">合槽投料</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  整槽理论消耗 {vatTotalKg} kg（{form.grammage} g/m² × 帘框 {frameAreaSqm(selectedMould?.frameW ?? 0, selectedMould?.frameH ?? 0).toFixed(3)} m² × 叠高 {form.stackHeight} 张），按各批投料量比例分摊。
+                </Typography>
+              </Box>
+              <Button size="small" variant="outlined" disabled={feedDrafts.length >= activeBatches.length} onClick={() => setFeedDrafts((current) => [...current, emptyFeedDraft()])} data-testid="add-feed">
+                添加一批
+              </Button>
+            </Box>
+            <Stack spacing={1.5}>
+              {feedDrafts.map((draft, index) => {
+                const allocation = allocations.find((item) => item.batchId === draft.batchId && draft.feedKg > 0)
+                const remaining = accounts.get(draft.batchId)?.remainingKg
+                const short = allocation !== undefined && remaining !== undefined && allocation.consumedKg > remaining
+                return (
+                  <Grid container spacing={1.5} alignItems="center" key={index}>
+                    <Grid item xs={12} sm={5} md={4}>
+                      <TextField select fullWidth size="small" label={`料批 ${index + 1}`} value={draft.batchId} onChange={(event) => updateFeedDraft(index, { batchId: Number(event.target.value) })} SelectProps={{ native: true, inputProps: { 'data-testid': `field-feedBatch-${index}` } }}>
+                        <option value={0}>选择料批</option>
+                        {activeBatches.map((batch) => (
+                          <option key={batch.id} value={batch.id} disabled={feedDrafts.some((other, position) => position !== index && other.batchId === batch.id)}>
+                            {batch.batchNo} · {batch.material} · 余 {accounts.get(batch.id ?? 0)?.remainingKg ?? 0} kg
+                          </option>
+                        ))}
+                      </TextField>
+                    </Grid>
+                    <Grid item xs={6} sm={3} md={2}>
+                      <TextField fullWidth size="small" type="number" label="投料量" value={draft.feedKg} onChange={(event) => updateFeedDraft(index, { feedKg: Number(event.target.value) })} inputProps={{ min: 0.5, max: 500, step: 0.5, 'data-testid': `field-feedKg-${index}` }} InputProps={{ endAdornment: 'kg' }} />
+                    </Grid>
+                    <Grid item xs={12} sm={4} md={5}>
+                      <Typography variant="body2" color={short ? 'error' : 'text.secondary'}>
+                        {draft.batchId > 0 && allocation
+                          ? `占比 ${allocation.sharePct}% · 分摊消耗 ${allocation.consumedKg} kg · 余量 ${remaining ?? 0} kg${short ? '（不足）' : ''}`
+                          : '选择料批并填写投料量后自动分摊'}
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} md={1} sx={{ textAlign: { md: 'right' } }}>
+                      <Button size="small" color="inherit" disabled={feedDrafts.length <= 1} onClick={() => setFeedDrafts((current) => current.filter((_, position) => position !== index))}>
+                        移除
+                      </Button>
+                    </Grid>
+                  </Grid>
+                )
+              })}
+            </Stack>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              合计投料 {totalFeedKg} kg · 提交后整槽原子写入，重复提交不会再次扣料
+            </Typography>
+
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2.5 }}>
               <Button onClick={() => setShowForm(false)}>取消</Button>
               <Button variant="contained" onClick={handleSubmit} disabled={submitting} data-testid="submit-run">保存工序</Button>
@@ -174,6 +260,7 @@ export default function RunBoard() {
                   <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
                     <Chip size="small" label={latestRun.runNo} />
                     <Chip size="small" variant="outlined" label={formatGrammage(latestRun.grammage)} />
+                    {latestRun.frozen && <Chip size="small" color="warning" label="已冻结" />}
                   </Box>
                   <ProcessTimeline steps={processSteps} compact />
                 </>
@@ -212,7 +299,7 @@ export default function RunBoard() {
           <TableHead>
             <TableRow>
               <TableCell>工序 / 日期</TableCell>
-              <TableCell>纸帘与料批</TableCell>
+              <TableCell>纸帘与投料</TableCell>
               <TableCell>抄纸参数</TableCell>
               <TableCell align="right">克重</TableCell>
               <TableCell>实测间距与偏差</TableCell>
@@ -222,19 +309,28 @@ export default function RunBoard() {
           <TableBody>
             {filteredRuns.map((run) => {
               const mould = mouldById.get(run.mouldId)
-              const batch = batchById.get(run.batchId)
+              const runFeeds = (run.id === undefined ? [] : feedsByRunId.get(run.id) ?? []).slice().sort((a, b) => b.sharePct - a.sharePct)
               const draftGap = run.id === undefined ? run.measuredGap : draftGaps[run.id] ?? run.measuredGap
               const draftDeviation = calculateDeviation(draftGap, mould?.stripeGap ?? draftGap)
               const exceeded = isGapOutOfTolerance(draftDeviation)
               return (
-                <TableRow key={run.id ?? run.runNo} data-testid="row-run" hover sx={{ bgcolor: exceeded ? '#fff7d9' : undefined }}>
+                <TableRow key={run.id ?? run.runNo} data-testid="row-run" hover sx={{ bgcolor: run.frozen ? '#eceae4' : exceeded ? '#fff7d9' : undefined }}>
                   <TableCell>
-                    <Typography sx={{ fontWeight: 750 }}>{run.runNo}</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                      <Typography sx={{ fontWeight: 750 }}>{run.runNo}</Typography>
+                      {run.frozen && <Chip size="small" color="warning" variant="outlined" label="已冻结" />}
+                    </Box>
                     <Typography variant="caption" color="text.secondary">{run.runDate} · {run.operator}</Typography>
                   </TableCell>
                   <TableCell>
                     <Typography variant="body2">{mould?.mouldNo ?? '未关联纸帘'}</Typography>
-                    <Typography variant="caption" color="text.secondary">{batch?.batchNo ?? '未关联料批'} · {batch?.material ?? '待补'}</Typography>
+                    {runFeeds.length > 0 ? runFeeds.map((feed) => (
+                      <Typography key={feed.id ?? feed.feedNo} variant="caption" color="text.secondary" display="block">
+                        {feed.batchNo} · {feed.material} · {feed.sharePct}% · 耗 {feed.consumedKg} kg
+                      </Typography>
+                    )) : (
+                      <Typography variant="caption" color="text.secondary">未关联料批</Typography>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Typography variant="body2">{run.stripeDirection} · 荡料 {run.dipCount} 次</Typography>
@@ -251,8 +347,9 @@ export default function RunBoard() {
                       min={0.1}
                       max={5}
                       step={0.01}
+                      disabled={run.frozen}
                       testId={run.id === undefined ? undefined : `row-measuredGap-${run.id}`}
-                      helperText={<Typography component="span" variant="caption" color={exceeded ? 'warning.dark' : 'text.secondary'}>{exceeded ? '超差：' : '合格：'}{getGapConclusion(draftDeviation)}（{draftDeviation > 0 ? '+' : ''}{draftDeviation.toFixed(2)} mm）</Typography>}
+                      helperText={<Typography component="span" variant="caption" color={exceeded ? 'warning.dark' : 'text.secondary'}>{run.frozen ? '料批已停用，记录冻结' : exceeded ? '超差：' : '合格：'}{run.frozen ? '' : `${getGapConclusion(draftDeviation)}（${draftDeviation > 0 ? '+' : ''}${draftDeviation.toFixed(2)} mm）`}</Typography>}
                       compact
                     />
                   </TableCell>
@@ -261,12 +358,12 @@ export default function RunBoard() {
                       size="small"
                       variant={exceeded ? 'contained' : 'outlined'}
                       color={exceeded ? 'warning' : 'primary'}
-                      disabled={run.id === undefined || draftGap === run.measuredGap}
+                      disabled={run.id === undefined || run.frozen || draftGap === run.measuredGap}
                       onClick={() => {
                         if (run.id !== undefined) void updateMeasuredGap(run.id, draftGap, mould?.stripeGap ?? draftGap)
                       }}
                     >
-                      {draftGap === run.measuredGap ? '已记录' : '保存实测'}
+                      {run.frozen ? '已冻结' : draftGap === run.measuredGap ? '已记录' : '保存实测'}
                     </Button>
                   </TableCell>
                 </TableRow>

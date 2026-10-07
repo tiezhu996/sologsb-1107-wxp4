@@ -98,7 +98,7 @@ export default function SampleCards() {
               <Grid item xs={12} md={4}>
                 <TextField select fullWidth label="对应工序" value={form.runId} onChange={(event) => updateForm('runId', Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-runId' } }}>
                   {!runs.some((run) => run.id === form.runId) && <option value={form.runId}>工序数据载入中</option>}
-                  {runs.map((run) => <option key={run.id} value={run.id}>{run.runNo} · {run.runDate}</option>)}
+                  {runs.filter((run) => !run.frozen).map((run) => <option key={run.id} value={run.id}>{run.runNo} · {run.runDate}</option>)}
                 </TextField>
               </Grid>
               <Grid item xs={6} md={2}><TextField fullWidth type="number" label="样本尺寸" value={form.sizeMm} onChange={(event) => updateForm('sizeMm', Number(event.target.value))} inputProps={{ min: 20, max: 1000, step: 1, 'data-testid': 'field-sizeMm' }} InputProps={{ endAdornment: 'mm' }} /></Grid>
@@ -158,7 +158,10 @@ export default function SampleCards() {
                     <Typography variant="h6" sx={{ fontWeight: 800 }}>{sample.sampleNo}</Typography>
                     <Typography variant="caption" color="text.secondary">工序 {run?.runNo ?? '待关联'} · {run?.runDate ?? '日期待补'}</Typography>
                   </Box>
-                  <Chip size="small" color={tier.color} label={tier.label} />
+                  <Box sx={{ display: 'flex', gap: 0.75 }}>
+                    {sample.frozen && <Chip size="small" color="warning" variant="outlined" label="已冻结" />}
+                    <Chip size="small" color={tier.color} label={tier.label} />
+                  </Box>
                 </Box>
                 <GrainStripePreview
                   gap={gap}

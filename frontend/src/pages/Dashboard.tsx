@@ -5,8 +5,10 @@ import { StatBadge } from '../components/common/StatBadge'
 import { useMouldFilter } from '../hooks/useMouldFilter'
 import { useFiberStore } from '../stores/fiberStore'
 import { useMouldStore } from '../stores/mouldStore'
+import { usePulpStore } from '../stores/pulpStore'
 import { useRunStore } from '../stores/runStore'
 import { useSampleStore } from '../stores/sampleStore'
+import { summarizePulpAccounts } from '../utils/pulp'
 import { isGapOutOfTolerance } from '../utils/stripe'
 
 function startOfCurrentWeek(): Date {
@@ -47,13 +49,16 @@ export default function Dashboard() {
   const samples = useSampleStore((state) => state.paperSamples)
   const sampleError = useSampleStore((state) => state.error)
   const loadSamples = useSampleStore((state) => state.loadSamples)
+  const pulpFeeds = usePulpStore((state) => state.pulpFeeds)
+  const loadPulpFeeds = usePulpStore((state) => state.loadPulpFeeds)
 
   useEffect(() => {
     void loadMoulds()
     void loadBatches()
     void loadRuns()
     void loadSamples()
-  }, [loadBatches, loadMoulds, loadRuns, loadSamples])
+    void loadPulpFeeds()
+  }, [loadBatches, loadMoulds, loadPulpFeeds, loadRuns, loadSamples])
 
   const { filteredMoulds: activeMoulds } = useMouldFilter(moulds, '', '在用')
   const currentWeekRuns = useMemo(() => runs.filter((run) => isInCurrentWeek(run.runDate)), [runs])
@@ -66,6 +71,10 @@ export default function Dashboard() {
     [runById, samples],
   )
   const activeRate = moulds.length ? Math.round((activeMoulds.length / moulds.length) * 100) : 0
+  const lowStockCount = useMemo(() => {
+    const accounts = summarizePulpAccounts(pulpFeeds)
+    return batches.filter((batch) => batch.status === '在用' && (accounts.get(batch.id ?? 0)?.remainingKg ?? 0) < 20).length
+  }, [batches, pulpFeeds])
   const error = mouldError ?? batchError ?? runError ?? sampleError
 
   return (
@@ -83,7 +92,7 @@ export default function Dashboard() {
 
       <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap' }}>
         <StatBadge label="在册纸帘" value={moulds.length} detail={`在用 ${activeMoulds.length} 张`} />
-        <StatBadge label="纤维料批" value={batches.length} detail="覆盖四类造纸纤维" tone="bamboo" />
+        <StatBadge label="纤维料批" value={batches.length} detail={lowStockCount ? `${lowStockCount} 批余量不足 20 kg` : '余量均可满足合槽'} tone={lowStockCount ? 'warning' : 'bamboo'} />
         <StatBadge label="本周工序" value={currentWeekRuns.length} detail="按自然周统计" tone="bamboo" />
         <StatBadge label="待复检样本" value={pendingSamples.length} detail="匀度或帘纹偏差需复核" tone={pendingSamples.length ? 'warning' : 'neutral'} />
       </Box>

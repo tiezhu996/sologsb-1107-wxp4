@@ -7,6 +7,9 @@ export type CookAgent = (typeof COOK_AGENTS)[number]
 export const BLEACH_METHODS = ['日晒', '漂白粉'] as const
 export type BleachMethod = (typeof BLEACH_METHODS)[number]
 
+export const BATCH_STATES = ['在用', '停用'] as const
+export type BatchState = (typeof BATCH_STATES)[number]
+
 export interface FiberBatch {
   id?: number
   batchNo: string
@@ -17,7 +20,8 @@ export interface FiberBatch {
   bleachMethod: BleachMethod
   beatingDegree: number
   operator: string
+  status: BatchState
   schemaRev?: number
 }
 
-export type FiberBatchInput = Omit<FiberBatch, 'id' | 'schemaRev'>
+export type FiberBatchInput = Omit<FiberBatch, 'id' | 'schemaRev' | 'status'>

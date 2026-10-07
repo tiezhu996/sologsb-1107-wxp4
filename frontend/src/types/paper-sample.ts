@@ -9,7 +9,9 @@ export interface PaperSample {
   stripeCount: number
   evenness: EvennessLevel
   archiveBin: string
+  /** 关联料批停用后随工序一并冻结 */
+  frozen?: boolean
   schemaRev?: number
 }
 
-export type PaperSampleInput = Omit<PaperSample, 'id' | 'schemaRev'>
+export type PaperSampleInput = Omit<PaperSample, 'id' | 'schemaRev' | 'frozen'>
