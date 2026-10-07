@@ -9,6 +9,7 @@ interface SampleStore {
   error: string | null
   loadSamples: () => Promise<void>
   addSample: (input: PaperSampleInput) => Promise<PaperSample | null>
+  setSamples: (samples: PaperSample[]) => void
 }
 
 export const useSampleStore = create<SampleStore>((set, get) => ({
@@ -30,8 +31,14 @@ export const useSampleStore = create<SampleStore>((set, get) => ({
     set({ error: null })
     try {
       const payload = plain(input)
-      const id = Number(await db.paperSamples.add(payload))
-      const created: PaperSample = { ...payload, id, schemaRev: 2 }
+      const linkedRun = await db.sheetRuns.get(input.runId)
+      if (linkedRun?.frozen) {
+        set({ error: '对应工序已因料批停用而冻结，不能再登记成纸样本' })
+        return null
+      }
+      const frozen = Boolean(linkedRun?.frozen)
+      const id = Number(await db.paperSamples.add({ ...payload, frozen, schemaRev: 3 }))
+      const created: PaperSample = { ...payload, id, frozen, schemaRev: 3 }
       set((state) => ({ paperSamples: [created, ...state.paperSamples] }))
       return created
     } catch {
@@ -39,4 +46,5 @@ export const useSampleStore = create<SampleStore>((set, get) => ({
       return null
     }
   },
+  setSamples: (paperSamples) => set({ paperSamples }),
 }))

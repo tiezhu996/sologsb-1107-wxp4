@@ -98,7 +98,7 @@ export default function SampleCards() {
               <Grid item xs={12} md={4}>
                 <TextField select fullWidth label="对应工序" value={form.runId} onChange={(event) => updateForm('runId', Number(event.target.value))} SelectProps={{ native: true, inputProps: { 'data-testid': 'field-runId' } }}>
                   {!runs.some((run) => run.id === form.runId) && <option value={form.runId}>工序数据载入中</option>}
-                  {runs.map((run) => <option key={run.id} value={run.id}>{run.runNo} · {run.runDate}</option>)}
+                  {runs.map((run) => <option key={run.id} value={run.id} disabled={run.frozen}>{run.runNo} · {run.runDate}{run.frozen ? ' · 已冻结' : ''}</option>)}
                 </TextField>
               </Grid>
               <Grid item xs={6} md={2}><TextField fullWidth type="number" label="样本尺寸" value={form.sizeMm} onChange={(event) => updateForm('sizeMm', Number(event.target.value))} inputProps={{ min: 20, max: 1000, step: 1, 'data-testid': 'field-sizeMm' }} InputProps={{ endAdornment: 'mm' }} /></Grid>
@@ -151,11 +151,14 @@ export default function SampleCards() {
           const tier = stripeTier(sample.stripeCount)
           const gap = run?.measuredGap ?? mould?.stripeGap ?? 1
           return (
-            <Card key={sample.id ?? sample.sampleNo} data-testid="row-sample" sx={{ bgcolor: sample.evenness === '均匀' ? '#fffdf7' : '#fff9e8' }}>
+            <Card key={sample.id ?? sample.sampleNo} data-testid="row-sample" sx={{ bgcolor: sample.frozen ? '#f1f1f1' : sample.evenness === '均匀' ? '#fffdf7' : '#fff9e8' }}>
               <CardContent sx={{ p: 2.25 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 1.5, alignItems: 'flex-start', mb: 1.5 }}>
                   <Box>
-                    <Typography variant="h6" sx={{ fontWeight: 800 }}>{sample.sampleNo}</Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                      <Typography variant="h6" sx={{ fontWeight: 800 }}>{sample.sampleNo}</Typography>
+                      {sample.frozen && <Chip size="small" label="冻结" variant="outlined" data-testid={`frozen-sample-${sample.id}`} />}
+                    </Box>
                     <Typography variant="caption" color="text.secondary">工序 {run?.runNo ?? '待关联'} · {run?.runDate ?? '日期待补'}</Typography>
                   </Box>
                   <Chip size="small" color={tier.color} label={tier.label} />
